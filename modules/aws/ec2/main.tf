@@ -14,7 +14,7 @@ data "aws_ami" "amazon_linux_2023" {
   }
 }
 
-resource "aws_instance" "this" {
+resource "aws_instance" "aws_ec2" {
   ami                         = local.ami_id
   instance_type               = var.instance_type
   subnet_id                   = var.subnet_id
@@ -41,9 +41,9 @@ resource "aws_instance" "this" {
   }
 }
 
-resource "aws_eip" "this" {
+resource "aws_eip" "aws_eip" {
   count    = var.create_eip ? 1 : 0
-  instance = aws_instance.this.id
+  instance = aws_instance.aws_ec2.id
   domain   = "vpc"
 
   tags = local.common_tags
@@ -51,7 +51,7 @@ resource "aws_eip" "this" {
 
 resource "aws_ebs_volume" "additional" {
   count             = length(var.additional_ebs_volumes)
-  availability_zone = aws_instance.this.availability_zone
+  availability_zone = aws_instance.aws_ec2.availability_zone
   size              = var.additional_ebs_volumes[count.index].size
   type              = var.additional_ebs_volumes[count.index].type
   encrypted         = var.additional_ebs_volumes[count.index].encrypted
@@ -65,5 +65,5 @@ resource "aws_volume_attachment" "additional" {
   count       = length(var.additional_ebs_volumes)
   device_name = var.additional_ebs_volumes[count.index].device_name
   volume_id   = aws_ebs_volume.additional[count.index].id
-  instance_id = aws_instance.this.id
+  instance_id = aws_instance.aws_ec2.id
 }

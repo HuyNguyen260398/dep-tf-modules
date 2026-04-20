@@ -95,7 +95,7 @@ The result is accessed as `data.aws_ami.amazon_linux_2023[0].id`. The `[0]` inde
 
 ---
 
-### Block 2 — `resource "aws_instance" "this"`
+### Block 2 — `resource "aws_instance" "aws_ec2"`
 
 The core EC2 instance resource.
 
@@ -151,7 +151,7 @@ Tells Terraform to stop tracking drift on these two arguments after initial crea
 An Elastic IP is a **static** public IP that persists independently of the instance lifecycle. Without one, stopping and starting an instance assigns a different public IP each time.
 
 - `count = var.create_eip ? 1 : 0` — only created when the caller opts in. When disabled, no EIP is allocated and no cost is incurred.
-- `instance = aws_instance.this.id` — associates the EIP with the instance and creates an implicit dependency, ensuring the instance is created first.
+- `instance = aws_instance.aws_ec2.id` — associates the EIP with the instance and creates an implicit dependency, ensuring the instance is created first.
 - `domain = "vpc"` — required for all modern EIPs used within a VPC.
 
 ---
@@ -161,7 +161,7 @@ An Elastic IP is a **static** public IP that persists independently of the insta
 Creates one independent EBS volume per entry in `var.additional_ebs_volumes`.
 
 - `count = length(var.additional_ebs_volumes)` — zero volumes by default; grows with the input list.
-- `availability_zone = aws_instance.this.availability_zone` — EBS volumes must be in the same AZ as their instance. Reading it from the instance avoids a caller misconfiguration and creates an implicit dependency.
+- `availability_zone = aws_instance.aws_ec2.availability_zone` — EBS volumes must be in the same AZ as their instance. Reading it from the instance avoids a caller misconfiguration and creates an implicit dependency.
 - `count.index` — the loop index used to read the corresponding object from the input list.
 - `tags = merge(local.common_tags, { Name = "..." })` — each volume gets a unique `Name` tag based on its device name while inheriting all other common tags.
 
@@ -183,14 +183,14 @@ Exposes instance attributes to callers for display (`terraform output`) or modul
 
 | Output | Source | Notes |
 |--------|--------|-------|
-| `instance_id` | `aws_instance.this.id` | Primary identifier for the instance |
-| `instance_arn` | `aws_instance.this.arn` | Used in IAM policies and cross-account references |
-| `private_ip` | `aws_instance.this.private_ip` | Always available regardless of public IP settings |
+| `instance_id` | `aws_instance.aws_ec2.id` | Primary identifier for the instance |
+| `instance_arn` | `aws_instance.aws_ec2.arn` | Used in IAM policies and cross-account references |
+| `private_ip` | `aws_instance.aws_ec2.private_ip` | Always available regardless of public IP settings |
 | `public_ip` | Conditional | Returns EIP address if `create_eip = true`, otherwise the instance's ephemeral public IP |
-| `private_dns` | `aws_instance.this.private_dns` | Internal DNS hostname for VPC-internal connectivity |
-| `availability_zone` | `aws_instance.this.availability_zone` | Useful for placing dependent resources in the same AZ |
-| `ami_id` | `aws_instance.this.ami` | Records which AMI was actually used |
-| `eip_allocation_id` | `aws_eip.this[0].allocation_id` | `null` when no EIP was created |
+| `private_dns` | `aws_instance.aws_ec2.private_dns` | Internal DNS hostname for VPC-internal connectivity |
+| `availability_zone` | `aws_instance.aws_ec2.availability_zone` | Useful for placing dependent resources in the same AZ |
+| `ami_id` | `aws_instance.aws_ec2.ami` | Records which AMI was actually used |
+| `eip_allocation_id` | `aws_eip.aws_eip[0].allocation_id` | `null` when no EIP was created |
 | `additional_ebs_volume_ids` | `aws_ebs_volume.additional[*].id` | Empty list when no extra volumes were created |
 
 The `public_ip` output demonstrates output-level conditional logic — callers get one consistent output name regardless of whether an EIP or an ephemeral IP is in use.
@@ -205,11 +205,108 @@ Terraform resolves resource creation order automatically from the references in 
 data.aws_ami  ──► local.ami_id
                        │
                        ▼
-               aws_instance.this
+               aws_instance.aws_ec2
                 │              │
                 ▼              ▼
-          aws_eip.this    aws_ebs_volume.additional
+          aws_eip.aws_eip    aws_ebs_volume.additional
                                     │
                                     ▼
                           aws_volume_attachment.additional
 ```
+
+---
+
+## `resource` vs `module`
+
+### `resource` — a single infrastructure object
+
+A `resource` block tells Terraform to create, manage, and destroy **one specific thing** in a cloud provider. It maps directly to a single provider API call.
+
+```hcl
+resource "aws_instance" "aws_ec2" {
+  ami           = "ami-0abcdef1234567890"
+  instance_type = "t3.micro"
+}
+```
+
+The syntax is always `resource "<provider_type>" "<local_name>"`. There is no abstraction layer — what you write is exactly what gets created.
+
+### `module` — a reusable group of resources
+
+A `module` block calls a **packaged collection** of resources. It accepts inputs and returns outputs, hiding the internal implementation from the caller.
+
+```hcl
+module "ec2" {
+  source        = "./modules/aws/ec2"
+  name          = "web-server"
+  subnet_id     = "subnet-0abc123"
+  instance_type = "t3.small"
+}
+```
+
+### Why this module uses `resource` internally
+
+This directory **is** the module being packaged. Inside a module definition you always use `resource` blocks — that is the only way to provision infrastructure. The `module` keyword is used by a **caller** to invoke the package from the outside.
+
+```
+caller (uses "module" block)
+    └── modules/aws/ec2/ (uses "resource" blocks internally)
+            ├── resource "aws_instance" "aws_ec2"
+            ├── resource "aws_eip" "aws_ec2"
+            └── resource "aws_ebs_volume" "additional"
+```
+
+### When to use each
+
+**Use `resource` directly when:**
+
+- Authoring a module (as done here)
+- The infrastructure is simple, one-off, and not intended to be reused
+
+```hcl
+# A quick S3 bucket for a specific project
+resource "aws_s3_bucket" "assets" {
+  bucket = "my-project-assets"
+}
+```
+
+**Use `module` when:**
+
+- Reusing a proven pattern across multiple environments or projects
+- Enforcing organisational standards (tagging, encryption, naming) without every team having to repeat them
+- Composing larger infrastructure from smaller building blocks
+
+```hcl
+# Three EC2 instances, all sharing the same module defaults
+module "bastion" {
+  source        = "../../modules/aws/ec2"
+  name          = "bastion"
+  instance_type = "t3.micro"
+  subnet_id     = module.vpc.public_subnet_ids[0]
+}
+
+module "app_server" {
+  source        = "../../modules/aws/ec2"
+  name          = "app"
+  instance_type = "t3.medium"
+  subnet_id     = module.vpc.private_subnet_ids[0]
+  monitoring    = true
+}
+
+module "worker" {
+  source        = "../../modules/aws/ec2"
+  name          = "worker"
+  instance_type = "c6i.large"
+  subnet_id     = module.vpc.private_subnet_ids[1]
+}
+```
+
+### Summary
+
+| | `resource` | `module` |
+|--|-----------|---------|
+| **What it does** | Creates one cloud object | Calls a packaged group of resources |
+| **Used by** | Module authors | Module consumers |
+| **Abstraction** | None — direct API mapping | Hides implementation details |
+| **Reusability** | Low — copy-paste to reuse | High — parameterised and shareable |
+| **Analogy** | A single function | A library you import and call |
